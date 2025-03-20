@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport"="width=device-width, initial-scale=1.0">
+  <title>Naive Bayes Sentiment Analyzer</title>
+  <!-- Import React -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Import Babel for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Import Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    // Remove import statement since we're in browser environment
+    const { useState, useEffect } = React;
+
+    class SentimentAnalyzerErrorBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { hasError: false };
+      }
+    
+      static getDerivedStateFromError(error) {
+        return { hasError: true };
+      }
+    
+      render() {
+        if (this.state.hasError) {
+          return (
+            <div className="p-4 bg-red-100 border border-red-400 rounded">
+              <h2 className="text-red-800">Something went wrong. Please refresh the page.</h2>
+            </div>
+          );
+        }
+        return this.props.children;
+      }
+    }
+
+const NaiveBayesSentimentAnalyzer = () => {
+  // State for training data
+  const [trainingData, setTrainingData] = useState(() => {
+    // Load saved data on initialization
+    const savedData = localStorage.getItem('sentimentTrainingData');
+    return savedData ? JSON.parse(savedData) : [
+      { text: "I love this product", label: "positive" },
+      { text: "This is amazing", label: "positive" },
+      { text: "Great experience", label: "positive" },
+      { text: "I hate this", label: "negative" },
+      { text: "Terrible service", label: "negative" },
+      { text: "This is disappointing", label: "negative" },
+      { text: "It's okay I guess", label: "neutral" },
+      { text: "Not sure how I feel about this", label: "neutral" }
+    ];
+  });
+  
+  // State for test input
+  const [testInput, setTestInput] = useState("");
+  const [prediction, setPrediction] = useState(null);
+  const [confidenceScores, setConfidenceScores] = useState({});
+  
+  // State for new training example
+  const [newText, setNewText] = useState("");
+  const [newLabel, setNewLabel] = useState("positive");
+  
+  // Model variables
+  const [vocabulary, setVocabulary] = useState(new Set());
+  const [wordCounts, setWordCounts] = useState({});
+  const [labelCounts, setLabelCounts] = useState({});
+  const [labelPriors, setLabelPriors] = useState({});
+  const [wordProbs, setWordProbs] = useState({});
+  
+  // Add new error states
+  const [errors, setErrors] = useState({
+    training: null,
+    prediction: null,
+    input: null
+  });
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const [activeTab, setActiveTab] = useState('results');
+  const [mainTab, setMainTab] = useState('analyzer');
+
+  // Add new functions for import/export
+  const exportTrainingData = () => {
+    try {
+      const csvContent = "Sentence,Sentiment\n" + 
+        trainingData.map(item => 
+          `"${item.text.replace(/"/g, '""')}",${item.label}`
+        ).join('\n');
+      
+      const blob = new Blob([csvContent], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'sentiment-training-data.csv';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setErrors(prev => ({ ...prev, training: "Failed to export data" }));
+    }
+  };
+
+  const importTrainingData = async (event) => {
+    try {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const text = await file.text();
+      const lines = text.split('\n');
+      
+      // Skip header row and empty lines
+      const data = lines
+        .slice(1)
+        .filter(line => line.trim())
+        .map(line => {
+          // Handle both quoted and unquoted CSV formats
+          let [text, label] = line.includes('"') 
+            ? line.match(/"((?:[^"]*(?:"")*[^"]*)+)"\s*,\s*(\w+)/).slice(1)
+            : line.split(',');
+          
+          text = text.replace(/""/g, '"').trim();
+          label = label.trim();
+
+          if (!text || !['positive', 'negative', 'neutral'].includes(label)) {
+            throw new Error("Invalid data format");
+          }
+          
+          return { text, label };
+        });
+
+      setTrainingData(data);
+      setErrors(prev => ({ ...prev, training: null }));
+    } catch (error) {
+      setErrors(prev => ({ ...prev, training: "Failed to import data: " + error.message }));
+    } finally {
+      event.target.value = '';
+    }
+  };
+
+  // Preprocess text
+  const preprocessText = (text) => {
+    try {
+      return text
+        .toLowerCase()
+        .replace(/[^\w\s]/g, '')
+        .split(/\s+/)
+        .filter(word => word.length > 0);
+    } catch (error) {
+      throw new Error("Failed to process text input");
+    }
+  };
+
+  // Train the model
+  const trainModel = () => {
+    // Initialize counts
+    const newVocabulary = new Set();
+    const newWordCounts = {};
+    const newLabelCounts = {};
+    
+    // Process training data
+    trainingData.forEach(example => {
+      const { text, label } = example;
+      
+      // Initialize label counts if not exists
+      if (!newLabelCounts[label]) {
+        newLabelCounts[label] = 0;
+        newWordCounts[label] = {};
+      }
+      
+      // Increment label count
+      newLabelCounts[label]++;
+      
+      // Process words
+      const words = preprocessText(text);
+      words.forEach(word => {
+        newVocabulary.add(word);
+        
+        if (!newWordCounts[label][word]) {
+          newWordCounts[label][word] = 0;
+        }
+        newWordCounts[label][word]++;
+      });
+    });
+    
+    // Calculate priors
+    const totalExamples = trainingData.length;
+    const newLabelPriors = {};
+    Object.keys(newLabelCounts).forEach(label => {
+      newLabelPriors[label] = newLabelCounts[label] / totalExamples;
+    });
+    
+    // Calculate word probabilities with Laplace smoothing 
+    const newWordProbs = {};
+    const vocabSize = newVocabulary.size;
+    
+    Object.keys(newLabelCounts).forEach(label => {
+      newWordProbs[label] = {};
+      
+      // Count total words in this label
+      let totalWords = 0;
+      Object.values(newWordCounts[label]).forEach(count => {
+        totalWords += count;
+      });
+      
+      // Calculate probabilities with Laplace smoothing
+      newVocabulary.forEach(word => {
+        const wordCount = newWordCounts[label][word] || 0;
+        // Laplace smoothing formula: (count + 1) / (total + vocabulary_size)
+        newWordProbs[label][word] = (wordCount + 1) / (totalWords + vocabSize);
+      });
+    });
+    
+    // Update state
+    setVocabulary(newVocabulary);
+    setWordCounts(newWordCounts);
+    setLabelCounts(newLabelCounts);
+    setLabelPriors(newLabelPriors);
+    setWordProbs(newWordProbs);
+  };
+
+  // Predict sentiment
+  const predictSentiment = (text) => {
+    if (!text.trim() || Object.keys(labelPriors).length === 0) {
+      return null;
+    }
+    
+    const words = preprocessText(text);
+    const scores = {};
+    
+    // Calculate score for each label
+    Object.keys(labelPriors).forEach(label => {
+      // Start with log of prior probability
+      let score = Math.log(labelPriors[label]);
+      
+      // Add log probabilities of each word
+      words.forEach(word => {
+        // Use smoothed probability if word exists in vocabulary, otherwise use default
+        const wordProb = (vocabulary.has(word) && wordProbs[label][word]) 
+          ? wordProbs[label][word] 
+          : 1 / (Object.keys(wordCounts[label]).length + vocabulary.size);
+        
+        score += Math.log(wordProb);
+      });
+      
+      scores[label] = score;
+    });
+    
+    // Find label with highest score
+    let bestLabel = null;
+    let bestScore = -Infinity;
+    
+    Object.keys(scores).forEach(label => {
+      if (scores[label] > bestScore) {
+        bestScore = scores[label];
+        bestLabel = label;
+      }
+    });
+    
+    // Convert log probabilities to normalized confidence scores
+    const logScores = Object.values(scores);
+    const maxLogScore = Math.max(...logScores);
+    
+    // Convert to probabilities (exp of log scores)
+    const expScores = {};
+    let sumExpScores = 0;
+    
+    Object.keys(scores).forEach(label => {
+      // Subtract max for numerical stability
+      expScores[label] = Math.exp(scores[label] - maxLogScore);
+      sumExpScores += expScores[label];
+    });
+    
+    // Normalize to get probabilities
+    const confidenceScores = {};
+    Object.keys(expScores).forEach(label => {
+      confidenceScores[label] = expScores[label] / sumExpScores;
+    });
+    
+    return {
+      prediction: bestLabel,
+      confidenceScores
+    };
+  };
+
+  // Add new training example
+  const addTrainingExample = () => {
+    const inputError = validateInput(newText);
+    if (inputError) {
+      setErrors(prev => ({ ...prev, training: inputError }));
+      return;
+    }
+    
+    try {
+      const newExample = {
+        text: newText,
+        label: newLabel
+      };
+      setTrainingData(prev => [...prev, newExample]);
+      setNewText("");
+      setErrors(prev => ({ ...prev, training: null }));
+    } catch (error) {
+      setErrors(prev => ({ ...prev, training: "Failed to add training example" }));
+    }
+  };
+
+  // Remove training example
+  const removeTrainingExample = (index) => {
+    const updatedData = [...trainingData];
+    updatedData.splice(index, 1);
+    setTrainingData(updatedData);
+  };
+
+  // Analyze test input
+  const analyzeText = async () => {
+    const inputError = validateInput(testInput);
+    if (inputError) {
+      setErrors(prev => ({ ...prev, prediction: inputError }));
+      return;
+    }
+
+    if (!trainingData.length) {
+      setErrors(prev => ({ ...prev, prediction: "No training data available" }));
+      return;
+    }
+
+    setIsProcessing(true);
+    setErrors(prev => ({ ...prev, prediction: null }));
+
+    try {
+      const result = predictSentiment(testInput);
+      if (result) {
+        setPrediction(result.prediction);
+        setConfidenceScores(result.confidenceScores);
+      } else {
+        throw new Error("Could not analyze sentiment");
+      }
+    } catch (error) {
+      setErrors(prev => ({ ...prev, prediction: "Failed to analyze sentiment" }));
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Add function to handle adding test input to training data
+  const addTestInputToTraining = (selectedLabel = prediction) => {
+    if (testInput) {
+      const newExample = {
+        text: testInput,
+        label: selectedLabel
+      };
+      setTrainingData(prev => [...prev, newExample]);
+      setTestInput("");
+      setPrediction(null);
+      setConfidenceScores({});
+    }
+  };
+
+  // Add function to update training example label
+  const updateTrainingLabel = (index, newLabel) => {
+    const updatedData = [...trainingData];
+    updatedData[index] = { ...updatedData[index], label: newLabel };
+    setTrainingData(updatedData);
+  };
+
+  // Train the model when training data changes
+  useEffect(() => {
+    trainModel();
+  }, [trainingData]);
+
+  // Save training data when it changes
+  useEffect(() => {
+    localStorage.setItem('sentimentTrainingData', JSON.stringify(trainingData));
+  }, [trainingData]);
+
+  // Get color based on sentiment
+  const getSentimentColor = (sentiment) => {
+    switch(sentiment) {
+      case 'positive': return 'bg-green-100 border-green-500';
+      case 'negative': return 'bg-red-100 border-red-500';
+      case 'neutral': return 'bg-gray-100 border-gray-500';
+      default: return 'bg-blue-100 border-blue-500';
+    }
+  };
+
+  // Add input validation
+  const validateInput = (text) => {
+    if (!text.trim()) {
+      return "Text cannot be empty";
+    }
+    if (text.length > 1000) {
+      return "Text is too long (max 1000 characters)";
+    }
+    return null;
+  };
+
+  // Add this new function to format calculations
+  const formatCalculations = () => {
+    if (!prediction || !testInput) return null;
+    
+    const words = preprocessText(testInput);
+    const calculations = {};
+    
+    Object.keys(labelPriors).forEach(label => {
+      calculations[label] = {
+        prior: labelPriors[label],
+        logPrior: Math.log(labelPriors[label]),
+        words: words.map(word => {
+          const prob = (vocabulary.has(word) && wordProbs[label][word])
+            ? wordProbs[label][word]
+            : 1 / (Object.keys(wordCounts[label]).length + vocabulary.size);
+          return { word, prob, logProb: Math.log(prob) };
+        })
+      };
+    });
+    
+    return calculations;
+  };
+
+  return (
+    <div className="p-4 max-w-4xl mx-auto">
+      <h1 className="text-2xl font-bold mb-6">Naive Bayes Sentiment Analyzer</h1>
+
+      {/* Main Tab Navigation */}
+      <div className="mb-6 border-b">
+        <div className="flex">
+          <button
+            onClick={() => setMainTab('analyzer')}
+            className={`px-6 py-3 ${mainTab === 'analyzer' ? 'border-b-2 border-blue-500 font-semibold' : ''}`}
+          >
+            Analyzer
+          </button>
+          <button
+            onClick={() => setMainTab('about')}
+            className={`px-6 py-3 ${mainTab === 'about' ? 'border-b-2 border-blue-500 font-semibold' : ''}`}
+          >
+            About
+          </button>
+        </div>
+      </div>
+
+      {mainTab === 'about' ? (
+        <div className="prose max-w-none">
+          <h2 className="text-xl font-semibold mb-4">About the Naive Bayes Sentiment Analyzer</h2>
+          
+          <section className="mb-6">
+            <h3 className="text-lg font-semibold mb-2">What is Sentiment Analysis?</h3>
+            <p>Sentiment analysis is the process of determining the emotional tone behind a piece of text. This tool uses a Naive Bayes classifier to categorize text as positive, negative, or neutral.</p>
+          </section>
+
+          <section className="mb-6">
+            <h3 className="text-lg font-semibold mb-2">How Naive Bayes Works</h3>
+            <p>The Naive Bayes classifier uses Bayes' Theorem with a "naive" assumption of independence between features (words). The mathematical formula is:</p>
+            <pre className="bg-gray-100 p-3 rounded">P(class|text) ∝ P(class) × ∏ P(word|class)</pre>
+            <ul className="list-disc ml-6 mt-2">
+              <li>P(class) - Prior probability of each class (positive/negative/neutral)</li>
+              <li>P(word|class) - Probability of each word appearing in a given class</li>
+              <li>∏ - Product of all word probabilities</li>
+            </ul>
+          </section>
+
+          <section className="mb-6">
+            <h3 className="text-lg font-semibold mb-2">Key Features</h3>
+            <ul className="list-disc ml-6">
+              <li>Laplace (add-one) smoothing to handle unseen words</li>
+              <li>Log probabilities to prevent numerical underflow</li>
+              <li>Confidence scores using probability normalization</li>
+              <li>Interactive training data management</li>
+              <li>CSV import/export capabilities</li>
+            </ul>
+          </section>
+
+          <section className="mb-6">
+            <h3 className="text-lg font-semibold mb-2">Text Processing</h3>
+            <ol className="list-decimal ml-6">
+              <li>Text is converted to lowercase</li>
+              <li>Punctuation is removed</li>
+              <li>Text is split into individual words</li>
+              <li>Empty tokens are filtered out</li>
+            </ol>
+          </section>
+
+          <section className="mb-6">
+            <h3 className="text-lg font-semibold mb-2">Training Process</h3>
+            <ol className="list-decimal ml-6">
+              <li>Count occurrences of each word in each class</li>
+              <li>Calculate prior probabilities for each class</li>
+              <li>Apply Laplace smoothing to word probabilities</li>
+              <li>Store model parameters for prediction</li>
+            </ol>
+          </section>
+
+          <section>
+            <h3 className="text-lg font-semibold mb-2">Prediction Process</h3>
+            <ol className="list-decimal ml-6">
+              <li>Preprocess input text</li>
+              <li>Calculate log probabilities for each class</li>
+              <li>Sum log probabilities of words and prior</li>
+              <li>Convert to normalized confidence scores</li>
+              <li>Select class with highest probability</li>
+            </ol>
+          </section>
+        </div>
+      ) : (
+        // Wrap existing analyzer content
+        <>
+          {/* Training Section */}
+          <div className="mb-8 p-4 border rounded-lg bg-gray-50">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-semibold">Training Data</h2>
+              <div className="flex gap-2">
+                <button
+                  onClick={exportTrainingData}
+                  className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600"
+                >
+                  Export Data
+                </button>
+                <label className="px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600 cursor-pointer">
+                  Import Data
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={importTrainingData}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+            </div>
+            
+            <div className="mb-4">
+              <div className="flex gap-2 mb-2">
+                <input
+                  type="text"
+                  value={newText}
+                  onChange={(e) => setNewText(e.target.value)}
+                  placeholder="Enter example text"
+                  className="flex-grow p-2 border rounded"
+                />
+                <select
+                  value={newLabel}
+                  onChange={(e) => setNewLabel(e.target.value)}
+                  className="p-2 border rounded"
+                >
+                  <option value="positive">Positive</option>
+                  <option value="negative">Negative</option>
+                  <option value="neutral">Neutral</option>
+                </select>
+                <button
+                  onClick={addTrainingExample}
+                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+            
+            {errors.training && (
+              <div className="mt-2 p-2 text-red-700 bg-red-100 rounded">
+                {errors.training}
+              </div>
+            )}
+
+            <div className="max-h-64 overflow-y-auto border rounded bg-white">
+              <div className="flex justify-between p-2 bg-gray-100 border-b">
+                <h3 className="font-semibold">Training Examples</h3>
+                <button
+                  onClick={() => setEditMode(!editMode)}
+                  className="px-2 py-1 text-sm bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                >
+                  {editMode ? "Done Editing" : "Edit Labels"}
+                </button>
+              </div>
+              <table className="min-w-full">
+                <thead className="bg-gray-100">
+                  <tr>
+                    <th className="p-2 text-left">Text</th>
+                    <th className="p-2 text-left">Label</th>
+                    <th className="p-2 text-left">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trainingData.map((example, index) => (
+                    <tr key={index} className="border-t">
+                      <td className="p-2">{example.text}</td>
+                      <td className="p-2">
+                        {editMode ? (
+                          <select
+                            value={example.label}
+                            onChange={(e) => updateTrainingLabel(index, e.target.value)}
+                            className="p-1 border rounded"
+                          >
+                            <option value="positive">Positive</option>
+                            <option value="negative">Negative</option>
+                            <option value="neutral">Neutral</option>
+                          </select>
+                        ) : (
+                          <span className={`px-2 py-1 rounded-full text-sm ${getSentimentColor(example.label)}`}>
+                            {example.label}
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-2">
+                        <button
+                          onClick={() => removeTrainingExample(index)}
+                          className="px-2 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200"
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            
+            <div className="mt-4">
+              <p className="text-sm text-gray-600">
+                Total examples: {trainingData.length} | 
+                Classes: {Object.keys(labelCounts).join(", ")} | 
+                Vocabulary size: {vocabulary.size}
+              </p>
+            </div>
+          </div>
+          
+          {/* Testing Section */}
+          <div className="p-4 border rounded-lg bg-gray-50">
+            <h2 className="text-xl font-semibold mb-4">Test Sentiment</h2>
+            
+            <div className="mb-4">
+              <textarea
+                value={testInput}
+                onChange={(e) => {
+                  setTestInput(e.target.value);
+                  setErrors(prev => ({ ...prev, prediction: null }));
+                }}
+                placeholder="Enter text to analyze (max 1000 characters)"
+                className={`w-full p-2 border rounded h-24 ${
+                  errors.prediction ? 'border-red-500' : ''
+                }`}
+                maxLength={1000}
+              />
+            </div>
+            
+            {errors.prediction && (
+              <div className="mb-4 p-2 text-red-700 bg-red-100 rounded">
+                {errors.prediction}
+              </div>
+            )}
+            
+            <button
+              onClick={analyzeText}
+              disabled={isProcessing || !testInput.trim()}
+              className={`px-4 py-2 rounded ${
+                isProcessing || !testInput.trim()
+                  ? 'bg-gray-400 cursor-not-allowed'
+                  : 'bg-blue-500 hover:bg-blue-600'
+              } text-white`}
+            >
+              {isProcessing ? 'Analyzing...' : 'Analyze Sentiment'}
+            </button>
+            
+            {prediction && (
+              <div className="mt-4 p-4 border rounded bg-white">
+                <div className="border-b mb-4">
+                  <div className="flex">
+                    <button
+                      onClick={() => setActiveTab('results')}
+                      className={`px-4 py-2 ${activeTab === 'results' ? 'border-b-2 border-blue-500' : ''}`}
+                    >
+                      Results
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('numbers')}
+                      className={`px-4 py-2 ${activeTab === 'numbers' ? 'border-b-2 border-blue-500' : ''}`}
+                    >
+                      Numbers
+                    </button>
+                  </div>
+                </div>
+
+                {activeTab === 'results' ? (
+                  <>
+                    <h3 className="font-semibold mb-2">Results:</h3>
+                    <p className="mb-2">
+                      Prediction: 
+                      <span className={`ml-2 px-3 py-1 rounded-full ${getSentimentColor(prediction)}`}>
+                        {prediction}
+                      </span>
+                      <button
+                        onClick={() => addTestInputToTraining(prediction)}
+                        className="ml-4 px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600"
+                      >
+                        Add to Training Data as
+                      </button>
+                      <select
+                        onChange={(e) => addTestInputToTraining(e.target.value)}
+                        className="ml-2 p-1 border rounded"
+                      >
+                        <option value="positive">Positive</option>
+                        <option value="negative">Negative</option>
+                        <option value="neutral">Neutral</option>
+                      </select>
+                    </p>
+                    
+                    <h4 className="font-semibold mb-1">Confidence Scores:</h4>
+                    <div className="space-y-2">
+                      {Object.entries(confidenceScores).map(([label, score]) => (
+                        <div key={label} className="flex items-center">
+                          <span className="w-20">{label}:</span>
+                          <div className="flex-grow bg-gray-200 rounded-full h-4">
+                            <div
+                              className={`h-4 rounded-full ${
+                                label === 'positive' ? 'bg-green-500' :
+                                label === 'negative' ? 'bg-red-500' : 'bg-gray-500'
+                              }`}
+                              style={{ width: `${score * 100}%` }}
+                            ></div>
+                          </div>
+                          <span className="ml-2 w-16 text-right">{(score * 100).toFixed(1)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="space-y-4">
+                    <h3 className="font-semibold">Calculation Details:</h3>
+                    {Object.entries(formatCalculations() || {}).map(([label, calc]) => (
+                      <div key={label} className="border p-3 rounded">
+                        <h4 className="font-semibold mb-2 capitalize">{label} Calculation:</h4>
+                        <div className="space-y-2 text-sm">
+                          <p>Prior probability: {calc.prior.toFixed(4)} (log: {calc.logPrior.toFixed(4)})</p>
+                          <div className="ml-4">
+                            <p className="font-medium">Word Probabilities:</p>
+                            <table className="w-full">
+                              <thead>
+                                <tr className="text-left">
+                                  <th className="p-1">Word</th>
+                                  <th className="p-1">Probability</th>
+                                  <th className="p-1">Log Probability</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {calc.words.map(({ word, prob, logProb }, i) => (
+                                  <tr key={i} className="border-t">
+                                    <td className="p-1">{word}</td>
+                                    <td className="p-1">{prob.toFixed(4)}</td>
+                                    <td className="p-1">{logProb.toFixed(4)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                          <p className="font-medium mt-2">
+                            Final log score: {
+                              (calc.logPrior + calc.words.reduce((sum, { logProb }) => sum + logProb, 0)).toFixed(4)
+                            }
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+    // Remove export default and directly render
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(
+      <SentimentAnalyzerErrorBoundary>
+        <NaiveBayesSentimentAnalyzer />
+      </SentimentAnalyzerErrorBoundary>
+    );
+  </script>
+</body>
+</html>
