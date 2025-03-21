@@ -11,8 +11,14 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <!-- Import Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Configure Tailwind dark mode
+    tailwind.config = {
+      darkMode: 'class'
+    }
+  </script>
 </head>
-<body>
+<body class="bg-white text-gray-900 dark:bg-gray-900 dark:text-gray-100">
   <div id="root"></div>
   
   <script type="text/babel">
@@ -84,6 +90,11 @@ const NaiveBayesSentimentAnalyzer = () => {
   const [editMode, setEditMode] = useState(false);
   const [activeTab, setActiveTab] = useState('results');
   const [mainTab, setMainTab] = useState('analyzer');
+  // Add new state for N-gram analyzer
+  const [nGramSize, setNGramSize] = useState(2);
+  const [nGramWordProbs, setNGramWordProbs] = useState({});
+  const [nGramPrediction, setNGramPrediction] = useState(null);
+  const [nGramConfidenceScores, setNGramConfidenceScores] = useState({});
 
   // Add new functions for import/export
   const exportTrainingData = () => {
@@ -369,10 +380,13 @@ const NaiveBayesSentimentAnalyzer = () => {
     setTrainingData(updatedData);
   };
 
-  // Train the model when training data changes
+  // Update useEffect to handle tab changes
   useEffect(() => {
-    trainModel();
-  }, [trainingData]);
+    if (mainTab === 'ngram' || mainTab === 'analyzer') {
+      trainModel();
+      trainNGramModel();
+    }
+  }, [mainTab, trainingData, nGramSize]);
 
   // Save training data when it changes
   useEffect(() => {
@@ -382,10 +396,10 @@ const NaiveBayesSentimentAnalyzer = () => {
   // Get color based on sentiment
   const getSentimentColor = (sentiment) => {
     switch(sentiment) {
-      case 'positive': return 'bg-green-100 border-green-500';
-      case 'negative': return 'bg-red-100 border-red-500';
-      case 'neutral': return 'bg-gray-100 border-gray-500';
-      default: return 'bg-blue-100 border-blue-500';
+      case 'positive': return 'bg-green-100 dark:bg-green-800 border-green-500 dark:border-green-400 text-green-800 dark:text-green-100';
+      case 'negative': return 'bg-red-100 dark:bg-red-800 border-red-500 dark:border-red-400 text-red-800 dark:text-red-100';
+      case 'neutral': return 'bg-gray-100 dark:bg-gray-700 border-gray-500 dark:border-gray-400 text-gray-800 dark:text-gray-100';
+      default: return 'bg-blue-100 dark:bg-blue-800 border-blue-500 dark:border-blue-400 text-blue-800 dark:text-blue-100';
     }
   };
 
@@ -423,6 +437,136 @@ const NaiveBayesSentimentAnalyzer = () => {
     return calculations;
   };
 
+  // Add N-gram preprocessing function
+  const getNGrams = (text, n) => {
+    const words = preprocessText(text);
+    const ngrams = [];
+    for (let i = 0; i <= words.length - n; i++) {
+      ngrams.push(words.slice(i, i + n).join(' '));
+    }
+    return ngrams;
+  };
+
+  // Add N-gram training function
+  const trainNGramModel = () => {
+    const newNGramCounts = {};
+    const newNGramWordProbs = {};
+    
+    Object.keys(labelCounts).forEach(label => {
+      newNGramCounts[label] = {};
+      newNGramWordProbs[label] = {};
+      
+      trainingData.forEach(example => {
+        if (example.label === label) {
+          const ngrams = getNGrams(example.text, nGramSize);
+          ngrams.forEach(ngram => {
+            newNGramCounts[label][ngram] = (newNGramCounts[label][ngram] || 0) + 1;
+          });
+        }
+      });
+    });
+    
+    // Calculate probabilities with Laplace smoothing
+    Object.keys(newNGramCounts).forEach(label => {
+      const totalNGrams = Object.values(newNGramCounts[label]).reduce((a, b) => a + b, 0);
+      const vocabSize = Object.keys(newNGramCounts[label]).length;
+      
+      Object.keys(newNGramCounts).forEach(otherLabel => {
+        Object.keys(newNGramCounts[otherLabel]).forEach(ngram => {
+          const count = newNGramCounts[label][ngram] || 0;
+          newNGramWordProbs[label][ngram] = (count + 1) / (totalNGrams + vocabSize);
+        });
+      });
+    });
+    
+    setNGramWordProbs(newNGramWordProbs);
+  };
+
+  // Add N-gram prediction function
+  const predictNGramSentiment = (text) => {
+    if (!text.trim()) return null;
+    
+    // Ensure model is initialized
+    if (Object.keys(labelPriors).length === 0) {
+      trainModel();
+      trainNGramModel();
+    }
+    
+    const ngrams = getNGrams(text, nGramSize);
+    const scores = {};
+    
+    Object.keys(labelPriors).forEach(label => {
+      let score = Math.log(labelPriors[label]);
+      
+      ngrams.forEach(ngram => {
+        const prob = nGramWordProbs[label][ngram] || 
+          (1 / (Object.keys(nGramWordProbs[label]).length + 1));
+        score += Math.log(prob);
+      });
+      
+      scores[label] = score;
+    });
+    
+    // Convert to probabilities
+    const maxScore = Math.max(...Object.values(scores));
+    const expScores = {};
+    let sumExp = 0;
+    
+    Object.keys(scores).forEach(label => {
+      expScores[label] = Math.exp(scores[label] - maxScore);
+      sumExp += expScores[label];
+    });
+    
+    const confidenceScores = {};
+    let bestLabel = null;
+    let bestScore = -Infinity;
+    
+    Object.keys(expScores).forEach(label => {
+      confidenceScores[label] = expScores[label] / sumExp;
+      if (confidenceScores[label] > bestScore) {
+        bestScore = confidenceScores[label];
+        bestLabel = label;
+      }
+    });
+    
+    return { prediction: bestLabel, confidenceScores };
+  };
+
+  // Add N-gram analysis handler
+  const analyzeNGramText = () => {
+    const inputError = validateInput(testInput);
+    if (inputError) {
+      setErrors(prev => ({ ...prev, prediction: inputError }));
+      return;
+    }
+
+    if (!trainingData.length) {
+      setErrors(prev => ({ ...prev, prediction: "No training data available" }));
+      return;
+    }
+
+    setIsProcessing(true);
+    try {
+      // Ensure model is initialized
+      if (Object.keys(labelPriors).length === 0) {
+        trainModel();
+        trainNGramModel();
+      }
+      
+      const result = predictNGramSentiment(testInput);
+      if (result) {
+        setNGramPrediction(result.prediction);
+        setNGramConfidenceScores(result.confidenceScores);
+      } else {
+        throw new Error("Could not analyze sentiment");
+      }
+    } catch (error) {
+      setErrors(prev => ({ ...prev, prediction: "Failed to analyze sentiment" }));
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   return (
     <div className="p-4 max-w-4xl mx-auto">
       <h1 className="text-2xl font-bold mb-6">Naive Bayes Sentiment Analyzer</h1>
@@ -434,7 +578,13 @@ const NaiveBayesSentimentAnalyzer = () => {
             onClick={() => setMainTab('analyzer')}
             className={`px-6 py-3 ${mainTab === 'analyzer' ? 'border-b-2 border-blue-500 font-semibold' : ''}`}
           >
-            Analyzer
+            Naive Bayes
+          </button>
+          <button
+            onClick={() => setMainTab('ngram')}
+            className={`px-6 py-3 ${mainTab === 'ngram' ? 'border-b-2 border-blue-500 font-semibold' : ''}`}
+          >
+            N-gram Analysis
           </button>
           <button
             onClick={() => setMainTab('about')}
@@ -446,18 +596,22 @@ const NaiveBayesSentimentAnalyzer = () => {
       </div>
 
       {mainTab === 'about' ? (
-        <div className="prose max-w-none">
-          <h2 className="text-xl font-semibold mb-4">About the Naive Bayes Sentiment Analyzer</h2>
+        <div className="prose dark:prose-invert max-w-none">
+          <h2 className="text-xl font-semibold mb-4">About the Sentiment Analyzer</h2>
           
           <section className="mb-6">
             <h3 className="text-lg font-semibold mb-2">What is Sentiment Analysis?</h3>
-            <p>Sentiment analysis is the process of determining the emotional tone behind a piece of text. This tool uses a Naive Bayes classifier to categorize text as positive, negative, or neutral.</p>
+            <p>Sentiment analysis is the process of determining the emotional tone behind a piece of text. This tool provides two different approaches to sentiment analysis:</p>
+            <ul className="list-disc ml-6">
+              <li>Naive Bayes Classification (word-based)</li>
+              <li>N-gram Analysis (phrase-based)</li>
+            </ul>
           </section>
 
           <section className="mb-6">
-            <h3 className="text-lg font-semibold mb-2">How Naive Bayes Works</h3>
-            <p>The Naive Bayes classifier uses Bayes' Theorem with a "naive" assumption of independence between features (words). The mathematical formula is:</p>
-            <pre className="bg-gray-100 p-3 rounded">P(class|text) ∝ P(class) × ∏ P(word|class)</pre>
+            <h3 className="text-lg font-semibold mb-2">Naive Bayes Analysis</h3>
+            <p>The Naive Bayes classifier uses Bayes' Theorem with a "naive" assumption of independence between words. The mathematical formula is:</p>
+            <pre className="bg-gray-100 dark:bg-gray-800 p-3 rounded">P(class|text) ∝ P(class) × ∏ P(word|class)</pre>
             <ul className="list-disc ml-6 mt-2">
               <li>P(class) - Prior probability of each class (positive/negative/neutral)</li>
               <li>P(word|class) - Probability of each word appearing in a given class</li>
@@ -466,13 +620,27 @@ const NaiveBayesSentimentAnalyzer = () => {
           </section>
 
           <section className="mb-6">
+            <h3 className="text-lg font-semibold mb-2">N-gram Analysis</h3>
+            <p>N-gram analysis extends beyond individual words to consider sequences of N consecutive words:</p>
+            <ul className="list-disc ml-6">
+              <li>Unigrams (N=1): Individual words</li>
+              <li>Bigrams (N=2): Pairs of consecutive words</li>
+              <li>Trigrams (N=3): Sequences of three consecutive words</li>
+            </ul>
+            <p className="mt-2">This approach can capture more context and phrase-level patterns in the text.</p>
+          </section>
+
+          <section className="mb-6">
             <h3 className="text-lg font-semibold mb-2">Key Features</h3>
             <ul className="list-disc ml-6">
-              <li>Laplace (add-one) smoothing to handle unseen words</li>
+              <li>Dual analysis methods (Naive Bayes and N-grams)</li>
+              <li>Laplace (add-one) smoothing for both approaches</li>
               <li>Log probabilities to prevent numerical underflow</li>
               <li>Confidence scores using probability normalization</li>
               <li>Interactive training data management</li>
               <li>CSV import/export capabilities</li>
+              <li>Dark mode support</li>
+              <li>Detailed probability calculations view</li>
             </ul>
           </section>
 
@@ -481,7 +649,7 @@ const NaiveBayesSentimentAnalyzer = () => {
             <ol className="list-decimal ml-6">
               <li>Text is converted to lowercase</li>
               <li>Punctuation is removed</li>
-              <li>Text is split into individual words</li>
+              <li>Text is split into tokens (words or n-grams)</li>
               <li>Empty tokens are filtered out</li>
             </ol>
           </section>
@@ -489,10 +657,10 @@ const NaiveBayesSentimentAnalyzer = () => {
           <section className="mb-6">
             <h3 className="text-lg font-semibold mb-2">Training Process</h3>
             <ol className="list-decimal ml-6">
-              <li>Count occurrences of each word in each class</li>
+              <li>Count occurrences of tokens in each class</li>
               <li>Calculate prior probabilities for each class</li>
-              <li>Apply Laplace smoothing to word probabilities</li>
-              <li>Store model parameters for prediction</li>
+              <li>Apply Laplace smoothing to token probabilities</li>
+              <li>Store model parameters for both analysis methods</li>
             </ol>
           </section>
 
@@ -500,18 +668,195 @@ const NaiveBayesSentimentAnalyzer = () => {
             <h3 className="text-lg font-semibold mb-2">Prediction Process</h3>
             <ol className="list-decimal ml-6">
               <li>Preprocess input text</li>
+              <li>Generate appropriate tokens (words or n-grams)</li>
               <li>Calculate log probabilities for each class</li>
-              <li>Sum log probabilities of words and prior</li>
+              <li>Sum log probabilities of tokens and prior</li>
               <li>Convert to normalized confidence scores</li>
               <li>Select class with highest probability</li>
             </ol>
           </section>
         </div>
+      ) : mainTab === 'ngram' ? (
+        <div className="p-4 border rounded-lg bg-gray-50 dark:bg-gray-800">
+          <h2 className="text-xl font-semibold mb-4">N-gram Sentiment Analysis</h2>
+          
+          {/* N-gram Training Section */}
+          <div className="mb-8 p-4 border rounded bg-white dark:bg-gray-800">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold">N-gram Configuration</h3>
+              <div className="flex gap-2 items-center">
+                <span>N-gram Size:</span>
+                <select
+                  value={nGramSize}
+                  onChange={(e) => setNGramSize(Number(e.target.value))}
+                  className="p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+                >
+                  <option value="1">Unigram</option>
+                  <option value="2">Bigram</option>
+                  <option value="3">Trigram</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <p className="text-sm text-gray-600 dark:text-gray-300">
+                N-gram Statistics:
+                {Object.entries(nGramWordProbs).map(([label, probs]) => (
+                  <span key={label} className="ml-2">
+                    {label}: {Object.keys(probs).length} n-grams
+                  </span>
+                ))}
+              </p>
+            </div>
+          </div>
+          
+          {/* N-gram Testing Section */}
+          <div className="mb-4">
+            <textarea
+              value={testInput}
+              onChange={(e) => {
+                setTestInput(e.target.value);
+                setErrors(prev => ({ ...prev, prediction: null }));
+              }}
+              placeholder="Enter text to analyze (max 1000 characters)"
+              className="w-full p-2 border rounded h-24 bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+              maxLength={1000}
+            />
+          </div>
+          
+          <button
+            onClick={analyzeNGramText}
+            disabled={isProcessing || !testInput.trim()}
+            className={`px-4 py-2 rounded ${
+              isProcessing || !testInput.trim()
+                ? 'bg-gray-400 cursor-not-allowed'
+                : 'bg-blue-500 hover:bg-blue-600'
+            } text-white`}
+          >
+            {isProcessing ? 'Analyzing...' : 'Analyze with N-grams'}
+          </button>
+
+          {nGramPrediction && (
+            <div className="mt-4 p-4 border rounded bg-white dark:bg-gray-800">
+              <div className="border-b mb-4">
+                <div className="flex">
+                  <button
+                    onClick={() => setActiveTab('results')}
+                    className={`px-4 py-2 ${activeTab === 'results' ? 'border-b-2 border-blue-500' : ''}`}
+                  >
+                    Results
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('numbers')}
+                    className={`px-4 py-2 ${activeTab === 'numbers' ? 'border-b-2 border-blue-500' : ''}`}
+                  >
+                    Numbers
+                  </button>
+                </div>
+              </div>
+
+              {activeTab === 'results' ? (
+                <>
+                  <h3 className="font-semibold mb-2">N-gram Analysis Results:</h3>
+                  <p className="mb-4">
+                    Prediction: 
+                    <span className={`ml-2 px-3 py-1 rounded-full ${getSentimentColor(nGramPrediction)}`}>
+                      {nGramPrediction}
+                    </span>
+                    <button
+                      onClick={() => addTestInputToTraining(nGramPrediction)}
+                      className="ml-4 px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600"
+                    >
+                      Add to Training Data as
+                    </button>
+                    <select
+                      onChange={(e) => addTestInputToTraining(e.target.value)}
+                      className="ml-2 p-1 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+                    >
+                      <option value="positive">Positive</option>
+                      <option value="negative">Negative</option>
+                      <option value="neutral">Neutral</option>
+                    </select>
+                  </p>
+                  
+                  <h4 className="font-semibold mb-2">Confidence Scores:</h4>
+                  <div className="space-y-2">
+                    {Object.entries(nGramConfidenceScores).map(([label, score]) => (
+                      <div key={label} className="flex items-center">
+                        <span className="w-20">{label}:</span>
+                        <div className="flex-grow bg-gray-200 rounded-full h-4">
+                          <div
+                            className={`h-4 rounded-full ${
+                              label === 'positive' ? 'bg-green-500' :
+                              label === 'negative' ? 'bg-red-500' : 'bg-gray-500'
+                            }`}
+                            style={{ width: `${score * 100}%` }}
+                          ></div>
+                        </div>
+                        <span className="ml-2 w-16 text-right">{(score * 100).toFixed(1)}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="space-y-4">
+                  <h3 className="font-semibold">N-gram Calculation Details:</h3>
+                  {Object.entries(nGramWordProbs).map(([label, probs]) => (
+                    <div key={label} className="border p-3 rounded">
+                      <h4 className="font-semibold mb-2 capitalize">{label} Calculation:</h4>
+                      <div className="space-y-2 text-sm">
+                        <p>Prior probability: {labelPriors[label].toFixed(4)} (log: {Math.log(labelPriors[label]).toFixed(4)})</p>
+                        <div className="ml-4">
+                          <p className="font-medium">N-gram Probabilities:</p>
+                          <table className="w-full dark:text-gray-200">
+                            <thead>
+                              <tr className="text-left">
+                                <th className="p-1">N-gram</th>
+                                <th className="p-1">Probability</th>
+                                <th className="p-1">Log Probability</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {getNGrams(testInput, nGramSize).map((ngram, i) => {
+                                const prob = probs[ngram] || (1 / (Object.keys(probs).length + 1));
+                                const logProb = Math.log(prob);
+                                return (
+                                  <tr key={i} className="border-t">
+                                    <td className="p-1">"{ngram}"</td>
+                                    <td className="p-1">{prob.toFixed(4)}</td>
+                                    <td className="p-1">{logProb.toFixed(4)}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                        {nGramConfidenceScores[label] && (
+                          <div className="mt-2">
+                            <p className="font-medium">Final Scores:</p>
+                            <p>Confidence Score: {(nGramConfidenceScores[label] * 100).toFixed(2)}%</p>
+                            <p>Raw Score: {
+                              (Math.log(labelPriors[label]) + 
+                               getNGrams(testInput, nGramSize).reduce((sum, ngram) => {
+                                 const prob = probs[ngram] || (1 / (Object.keys(probs).length + 1));
+                                 return sum + Math.log(prob);
+                               }, 0)).toFixed(4)
+                            }</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       ) : (
         // Wrap existing analyzer content
         <>
           {/* Training Section */}
-          <div className="mb-8 p-4 border rounded-lg bg-gray-50">
+          <div className="mb-8 p-4 border rounded-lg bg-gray-50 dark:bg-gray-800">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-xl font-semibold">Training Data</h2>
               <div className="flex gap-2">
@@ -540,12 +885,12 @@ const NaiveBayesSentimentAnalyzer = () => {
                   value={newText}
                   onChange={(e) => setNewText(e.target.value)}
                   placeholder="Enter example text"
-                  className="flex-grow p-2 border rounded"
+                  className="flex-grow p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 dark:placeholder-gray-400"
                 />
                 <select
                   value={newLabel}
                   onChange={(e) => setNewLabel(e.target.value)}
-                  className="p-2 border rounded"
+                  className="p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
                 >
                   <option value="positive">Positive</option>
                   <option value="negative">Negative</option>
@@ -566,8 +911,8 @@ const NaiveBayesSentimentAnalyzer = () => {
               </div>
             )}
 
-            <div className="max-h-64 overflow-y-auto border rounded bg-white">
-              <div className="flex justify-between p-2 bg-gray-100 border-b">
+            <div className="max-h-64 overflow-y-auto border rounded bg-white dark:bg-gray-800">
+              <div className="flex justify-between p-2 bg-gray-100 dark:bg-gray-800 border-b">
                 <h3 className="font-semibold">Training Examples</h3>
                 <button
                   onClick={() => setEditMode(!editMode)}
@@ -577,7 +922,7 @@ const NaiveBayesSentimentAnalyzer = () => {
                 </button>
               </div>
               <table className="min-w-full">
-                <thead className="bg-gray-100">
+                <thead className="bg-gray-100 dark:bg-gray-800">
                   <tr>
                     <th className="p-2 text-left">Text</th>
                     <th className="p-2 text-left">Label</th>
@@ -593,7 +938,7 @@ const NaiveBayesSentimentAnalyzer = () => {
                           <select
                             value={example.label}
                             onChange={(e) => updateTrainingLabel(index, e.target.value)}
-                            className="p-1 border rounded"
+                            className="p-1 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
                           >
                             <option value="positive">Positive</option>
                             <option value="negative">Negative</option>
@@ -620,7 +965,7 @@ const NaiveBayesSentimentAnalyzer = () => {
             </div>
             
             <div className="mt-4">
-              <p className="text-sm text-gray-600">
+              <p className="text-sm text-gray-600 dark:text-gray-300">
                 Total examples: {trainingData.length} | 
                 Classes: {Object.keys(labelCounts).join(", ")} | 
                 Vocabulary size: {vocabulary.size}
@@ -629,7 +974,7 @@ const NaiveBayesSentimentAnalyzer = () => {
           </div>
           
           {/* Testing Section */}
-          <div className="p-4 border rounded-lg bg-gray-50">
+          <div className="p-4 border rounded-lg bg-gray-50 dark:bg-gray-800">
             <h2 className="text-xl font-semibold mb-4">Test Sentiment</h2>
             
             <div className="mb-4">
@@ -640,8 +985,8 @@ const NaiveBayesSentimentAnalyzer = () => {
                   setErrors(prev => ({ ...prev, prediction: null }));
                 }}
                 placeholder="Enter text to analyze (max 1000 characters)"
-                className={`w-full p-2 border rounded h-24 ${
-                  errors.prediction ? 'border-red-500' : ''
+                className={`w-full p-2 border rounded h-24 bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 dark:placeholder-gray-400 ${
+                  errors.prediction ? 'border-red-500 dark:border-red-400' : ''
                 }`}
                 maxLength={1000}
               />
@@ -666,7 +1011,7 @@ const NaiveBayesSentimentAnalyzer = () => {
             </button>
             
             {prediction && (
-              <div className="mt-4 p-4 border rounded bg-white">
+              <div className="mt-4 p-4 border rounded bg-white dark:bg-gray-800">
                 <div className="border-b mb-4">
                   <div className="flex">
                     <button
@@ -700,7 +1045,7 @@ const NaiveBayesSentimentAnalyzer = () => {
                       </button>
                       <select
                         onChange={(e) => addTestInputToTraining(e.target.value)}
-                        className="ml-2 p-1 border rounded"
+                        className="ml-2 p-1 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
                       >
                         <option value="positive">Positive</option>
                         <option value="negative">Negative</option>
@@ -712,7 +1057,9 @@ const NaiveBayesSentimentAnalyzer = () => {
                     <div className="space-y-2">
                       {Object.entries(confidenceScores).map(([label, score]) => (
                         <div key={label} className="flex items-center">
-                          <span className="w-20">{label}:</span>
+                          <span className="text-sm text-gray-600 dark:text-gray-300">
+                            {label}:
+                          </span>
                           <div className="flex-grow bg-gray-200 rounded-full h-4">
                             <div
                               className={`h-4 rounded-full ${
@@ -737,7 +1084,7 @@ const NaiveBayesSentimentAnalyzer = () => {
                           <p>Prior probability: {calc.prior.toFixed(4)} (log: {calc.logPrior.toFixed(4)})</p>
                           <div className="ml-4">
                             <p className="font-medium">Word Probabilities:</p>
-                            <table className="w-full">
+                            <table className="w-full dark:text-gray-200">
                               <thead>
                                 <tr className="text-left">
                                   <th className="p-1">Word</th>
@@ -775,10 +1122,45 @@ const NaiveBayesSentimentAnalyzer = () => {
   );
 };
 
-    // Remove export default and directly render
+    const DarkModeToggle = () => {
+      const [isDarkMode, setIsDarkMode] = useState(() => {
+        if (typeof window !== 'undefined') {
+          const darkModePreference = localStorage.getItem('darkMode') === 'true';
+          if (darkModePreference) {
+            document.documentElement.classList.add('dark');
+          }
+          return darkModePreference;
+        }
+        return false;
+      });
+
+      const toggleDarkMode = () => {
+        setIsDarkMode(prev => {
+          const newValue = !prev;
+          if (newValue) {
+            document.documentElement.classList.add('dark');
+          } else {
+            document.documentElement.classList.remove('dark');
+          }
+          localStorage.setItem('darkMode', newValue);
+          return newValue;
+        });
+      };
+
+      return (
+        <button
+          onClick={toggleDarkMode}
+          className="fixed top-4 right-4 px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-gray-100 rounded shadow hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
+        >
+          {isDarkMode ? '🌞 Light' : '🌙 Dark'}
+        </button>
+      );
+    };
+
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(
       <SentimentAnalyzerErrorBoundary>
+        <DarkModeToggle />
         <NaiveBayesSentimentAnalyzer />
       </SentimentAnalyzerErrorBoundary>
     );
