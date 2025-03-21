@@ -17,13 +17,16 @@
       darkMode: 'class'
     }
   </script>
+  <!-- Add D3.js and D3-Cloud -->
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/jasondavies/d3-cloud@1.2.5/build/d3.layout.cloud.js"></script>
 </head>
 <body class="bg-white text-gray-900 dark:bg-gray-900 dark:text-gray-100">
   <div id="root"></div>
   
   <script type="text/babel">
     // Remove import statement since we're in browser environment
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useRef } = React;
 
     class SentimentAnalyzerErrorBoundary extends React.Component {
       constructor(props) {
@@ -95,6 +98,12 @@ const NaiveBayesSentimentAnalyzer = () => {
   const [nGramWordProbs, setNGramWordProbs] = useState({});
   const [nGramPrediction, setNGramPrediction] = useState(null);
   const [nGramConfidenceScores, setNGramConfidenceScores] = useState({});
+  // Add word frequency state
+  const [wordFrequencies, setWordFrequencies] = useState({
+    positive: [],
+    negative: [],
+    neutral: []
+  });
 
   // Add new functions for import/export
   const exportTrainingData = () => {
@@ -567,6 +576,46 @@ const NaiveBayesSentimentAnalyzer = () => {
     }
   };
 
+  // Add function to calculate word frequencies
+  const calculateWordFrequencies = () => {
+    const frequencies = {
+      positive: {},
+      negative: {},
+      neutral: {}
+    };
+    
+    trainingData.forEach(({ text, label }) => {
+      const words = preprocessText(text);
+      words.forEach(word => {
+        if (!frequencies[label][word]) frequencies[label][word] = 0;
+        frequencies[label][word]++;
+      });
+    });
+    
+    // Convert to array format and sort by frequency
+    Object.keys(frequencies).forEach(sentiment => {
+      const words = Object.entries(frequencies[sentiment])
+        .map(([word, count]) => ({
+          word,
+          frequency: count
+        }))
+        .sort((a, b) => b.frequency - a.frequency)
+        .slice(0, 50); // Take top 50 words
+      
+      setWordFrequencies(prev => ({
+        ...prev,
+        [sentiment]: words
+      }));
+    });
+  };
+
+  // Update useEffect to calculate word frequencies
+  useEffect(() => {
+    if (mainTab === 'visualization') {
+      calculateWordFrequencies();
+    }
+  }, [mainTab, trainingData]);
+
   return (
     <div className="p-4 max-w-4xl mx-auto">
       <h1 className="text-2xl font-bold mb-6">Naive Bayes Sentiment Analyzer</h1>
@@ -591,6 +640,12 @@ const NaiveBayesSentimentAnalyzer = () => {
             className={`px-6 py-3 ${mainTab === 'about' ? 'border-b-2 border-blue-500 font-semibold' : ''}`}
           >
             About
+          </button>
+          <button
+            onClick={() => setMainTab('visualization')}
+            className={`px-6 py-3 ${mainTab === 'visualization' ? 'border-b-2 border-blue-500 font-semibold' : ''}`}
+          >
+            Visualization
           </button>
         </div>
       </div>
@@ -851,6 +906,24 @@ const NaiveBayesSentimentAnalyzer = () => {
               )}
             </div>
           )}
+        </div>
+      ) : mainTab === 'visualization' ? (
+        <div className="p-4 border rounded-lg bg-gray-50 dark:bg-gray-800">
+          <h2 className="text-xl font-semibold mb-4">Word Cloud Visualization</h2>
+          <div className="space-y-8">
+            <div>
+              <h3 className="text-lg font-semibold mb-2 text-green-600">Positive Sentiment Words</h3>
+              <WordCloud words={wordFrequencies.positive} sentiment="positive" />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold mb-2 text-red-600">Negative Sentiment Words</h3>
+              <WordCloud words={wordFrequencies.negative} sentiment="negative" />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold mb-2 text-gray-600">Neutral Sentiment Words</h3>
+              <WordCloud words={wordFrequencies.neutral} sentiment="neutral" />
+            </div>
+          </div>
         </div>
       ) : (
         // Wrap existing analyzer content
@@ -1121,6 +1194,52 @@ const NaiveBayesSentimentAnalyzer = () => {
     </div>
   );
 };
+
+    const WordCloud = ({ words, width = 600, height = 400, sentiment }) => {
+      const svgRef = useRef();
+      
+      useEffect(() => {
+        if (!words || !words.length) return;
+        
+        const svg = d3.select(svgRef.current);
+        svg.selectAll("*").remove();
+        
+        const color = sentiment === 'positive' ? d3.scaleOrdinal(d3.schemeGreens[9]) :
+                     sentiment === 'negative' ? d3.scaleOrdinal(d3.schemeReds[9]) :
+                     d3.scaleOrdinal(d3.schemeGreys[9]);
+        
+        const layout = d3.layout.cloud()
+          .size([width, height])
+          .words(words.map(d => ({
+            text: d.word,
+            size: 10 + (d.frequency * 50)
+          })))
+          .padding(5)
+          .rotate(() => 0)
+          .fontSize(d => d.size)
+          .on("end", draw);
+          
+        function draw(words) {
+          svg
+            .append("g")
+            .attr("transform", `translate(${width/2},${height/2})`)
+            .selectAll("text")
+            .data(words)
+            .join("text")
+            .style("font-size", d => `${d.size}px`)
+            .style("fill", (d, i) => color(i))
+            .attr("text-anchor", "middle")
+            .attr("transform", d => `translate(${d.x},${d.y})`)
+            .text(d => d.text);
+        }
+        
+        layout.start();
+      }, [words, width, height, sentiment]);
+      
+      return (
+        <svg ref={svgRef} width={width} height={height} className="bg-white dark:bg-gray-800 rounded shadow" />
+      );
+    };
 
     const DarkModeToggle = () => {
       const [isDarkMode, setIsDarkMode] = useState(() => {
